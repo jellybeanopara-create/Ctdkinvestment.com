@@ -1,126 +1,348 @@
-<!DOCTYPE html>
+const express = require("express");
+const session = require("express-session");
+const bcrypt = require("bcryptjs");
+const Database = require("better-sqlite3");
+
+const app = express();
+const db = new Database("ctdk.sqlite");
+
+const PORT = process.env.PORT || 3000;
+const SECRET = process.env.SESSION_SECRET;
+
+if (!SECRET || !process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) {
+  console.error("Set SESSION_SECRET, ADMIN_EMAIL and ADMIN_PASSWORD first.");
+  process.exit(1);
+}
+
+db.pragma("journal_mode = WAL");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ name TEXT NOT NULL,
+ email TEXT NOT NULL UNIQUE,
+ password TEXT NOT NULL,
+ role TEXT NOT NULL DEFAULT 'user',
+ status TEXT NOT NULL DEFAULT 'active',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS requests (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ user_id INTEGER NOT NULL,
+ type TEXT NOT NULL,
+ amount REAL NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending',
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+`);
+
+async function createAdmin() {
+ const email = process.env.ADMIN_EMAIL.toLowerCase().trim();
+ const exists = db.prepare("SELECT id FROM users WHERE email=?").get(email);
+ if (!exists) {
+   const hash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12);
+   db.prepare("INSERT INTO users(name,email,password,role) VALUES(?,?,?,?)")
+     .run("Administrator", email, hash, "admin");
+ }
+}
+ 
+app.use(express.json({ limit: "15kb" }));
+app.use(session({
+ secret: SECRET,
+ resave: false,
+ saveUninitialized: false,
+ cookie: {
+   httpOnly: true,
+   sameSite: "lax",
+   secure: process.env.NODE_ENV === "production",
+   maxAge: 8 * 60 * 60 * 1000
+ }
+}));
+
+function auth(req, res, next) {
+ const user = req.session.userId &&
+   db.prepare("SELECT id,name,email,role,status,created_at FROM users WHERE id=?")
+     .get(req.session.userId);
+
+ if (!user || user.status !== "active") {
+   return res.status(401).json({ error: "Please log in first." });
+ }
+ req.user = user;
+ next();
+}
+
+function admin(req, res, next) {
+ if (req.user.role !== "admin") {
+   return res.status(403).json({ error: "Admin access required." });
+ }
+ next();
+}
+
+const page = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CTDK Investment - Secure Financial Growth</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTDK Investment</title>
 <style>
-:root{--primary:#0f172a;--accent:#0ea5e9;--gold:#f59e0b;--bg:#f8fafc;--card:#ffffff;--text:#1e293b;--muted:#64748b;--border:#e2e8f0}
-*{margin:0;padding:0;box-sizing:border-box;font-family:Inter,system-ui,Arial}
-body{background:var(--bg);color:var(--text);line-height:1.6}
-header{background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
-.nav{max-width:1200px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;padding:14px 20px}
-.logo{font-weight:800;color:var(--primary);font-size:1.4rem;letter-spacing:-0.5px}.logo span{color:var(--accent)}
-nav a{margin-left:18px;text-decoration:none;color:var(--muted);font-weight:600;font-size:.95rem}
-.btn{padding:10px 18px;border-radius:8px;border:0;cursor:pointer;font-weight:700}
-.btn-primary{background:var(--accent);color:white}.btn-outline{background:transparent;border:1px solid var(--border)}
-.hero{max-width:1200px;margin:0 auto;padding:60px 20px;display:grid;grid-template-columns:1.1fr.9fr;gap:30px;align-items:center}
-.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;box-shadow:0 4px 20px rgba(0,0,0,.05)}
-.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-@media(max-width:850px){.hero{grid-template-columns:1fr}.grid3{grid-template-columns:1fr}}
-.badge{display:inline-block;padding:4px 10px;background:#e0f2fe;color:#0284c7;border-radius:20px;font-size:.8rem;font-weight:700}
-input,select{width:100%;padding:12px;border:1px solid var(--border);border-radius:8px;margin-top:6px}
-label{font-weight:600;font-size:.9rem;margin-top:14px;display:block}
-.section{max-width:1200px;margin:0 auto;padding:40px 20px}
-h2{font-size:1.9rem;margin-bottom:12px;color:var(--primary)}
-small{color:var(--muted)}
-.table{width:100%;border-collapse:collapse;margin-top:12px}.table th,.table td{padding:10px;border-bottom:1px solid var(--border);text-align:left;font-size:.9rem}
-.lang-select{padding:8px;border-radius:8px;border:1px solid var(--border)}
+:root{--navy:#0a1730;--green:#1bc58d;--bg:#f3f6fb}
+*{box-sizing:border-box}
+body{margin:0;font:15px Arial,sans-serif;background:var(--bg);color:#18243a}
+header{background:var(--navy);color:white;padding:20px;display:flex;justify-content:space-between;align-items:center}
+.brand{font-size:22px;font-weight:bold}.brand span{color:var(--green)}
+main{max-width:1000px;margin:auto;padding:22px}
+.hero{background:var(--navy);color:white;padding:35px 25px;border-radius:18px;margin:15px 0}
+h1{font-size:34px;line-height:1.15}.green{color:var(--green)}
+button{background:var(--green);border:0;border-radius:9px;padding:12px 16px;font-weight:bold;cursor:pointer;margin:4px 2px}
+.secondary{background:white;border:1px solid #ddd}
+input,select{width:100%;padding:12px;border:1px solid #d7deea;border-radius:8px;margin:7px 0 14px}
+.panel,.stat{background:white;border:1px solid #e1e7ef;border-radius:14px;padding:20px;margin:14px 0}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.muted{color:#718096;line-height:1.5}.hidden{display:none!important}
+label{font-size:13px;font-weight:bold}
+table{width:100%;border-collapse:collapse;min-width:500px}
+th,td{text-align:left;border-bottom:1px solid #e5eaf0;padding:12px;font-size:13px}
+.tablewrap{overflow:auto}.pill{background:#e0f8ee;color:#08774f;padding:6px 10px;border-radius:30px}
+.error{color:#b42318}.notice{background:#fff5d9;padding:13px;border-radius:9px;font-size:13px}
+footer{text-align:center;padding:20px;color:#718096;font-size:12px}
+@media(max-width:650px){main{padding:12px}.grid,.two{grid-template-columns:1fr}h1{font-size:29px}.hero{padding:25px 18px}}
 </style>
 </head>
 <body>
-<header>
-<div class="nav">
-<div class="logo">CTDK <span>Investment</span></div>
-<div>
-<select id="langSwitcher" class="lang-select" onchange="changeLang(this.value)">
-<option value="en">English</option><option value="fr">Français</option><option value="es">Español</option><option value="pt">Português</option><option value="ar">العربية</option><option value="yo">Yorùbá</option><option value="ha">Hausa</option><option value="ig">Igbo</option><option value="zh">中文</option>
-</select>
-<a href="#plans" data-i18n="nav_plans">Plans</a>
-<a href="#how" data-i18n="nav_how">How it Works</a>
-<a href="#faq" data-i18n="nav_faq">FAQ</a>
-<button class="btn btn-outline" onclick="showAuth('login')" data-i18n="login">Login</button>
-<button class="btn btn-primary" onclick="showAuth('register')" data-i18n="register">Register</button>
-</div>
-</div>
-</header>
-
-<section class="hero">
-<div>
-<span class="badge" data-i18n="hero_badge">SECURE • TRANSPARENT • COMPLIANT</span>
-<h1 style="font-size:2.6rem;margin:14px 0" data-i18n="hero_title">Build Your Financial Future with CTDK Investment</h1>
-<p style="color:var(--muted)" data-i18n="hero_desc">Professional investment management with transparent accounting, verified payments, and real risk disclosure. No fabricated returns.</p>
-<div style="margin-top:18px;display:flex;gap:10px">
-<button class="btn btn-primary" onclick="showAuth('register')" data-i18n="get_started">Get Started</button>
-<a href="#risk" class="btn btn-outline" data-i18n="risk_btn">Risk Disclosure</a>
-</div>
-<div class="grid3" style="margin-top:24px">
-<div class="card"><strong data-i18n="k1">Verified Payments</strong><br><small data-i18n="k1d">Webhook verified</small></div>
-<div class="card"><strong data-i18n="k2">Atomic Ledger</strong><br><small data-i18n="k2d">No duplicate credits</small></div>
-<div class="card"><strong data-i18n="k3">Audit Logs</strong><br><small data-i18n="k3d">Admin actions tracked</small></div>
-</div>
-</div>
-<div class="card" id="authBox">
-<h3 id="authTitle">Create Account</h3>
-<label data-i18n="full_name">Full Name</label><input id="fullname" placeholder="John Doe">
-<label>Email</label><input id="email" type="email" placeholder="john@example.com">
-<label data-i18n="phone">Phone with country code</label><input id="phone" placeholder="+234...">
-<label data-i18n="country">Country of Residence</label><select id="country"><option>Nigeria</option><option>Canada</option><option>USA</option><option>UK</option><option>Other</option></select>
-<label data-i18n="language_q">Which language do you understand best?</label><select id="prefLang"><option value="en">English</option><option value="fr">French</option><option value="yo">Yoruba</option><option value="ha">Hausa</option><option value="ig">Igbo</option></select>
-<label>Password</label><input id="pwd" type="password">
-<label data-i18n="confirm_pwd">Confirm Password</label><input id="pwd2" type="password">
-<div style="margin-top:12px"><input type="checkbox" id="terms"> <small data-i18n="terms_agree">I accept Terms and Privacy Policy</small></div>
-<button class="btn btn-primary" style="width:100%;margin-top:14px" onclick="registerMock()" data-i18n="create_account">Create Account - Send OTP</button>
-<small style="display:block;margin-top:8px">TODO Backend: Integrate email/SMS OTP provider. Do not mark verified until verified.</small>
-</div>
+<header><div class="brand">CTDK <span>Investment</span></div>
+<button id="logout" class="hidden" onclick="logout()">Log out</button></header>
+<main>
+<section id="home" class="hero">
+<p class="green">YOUR FINANCIAL SPACE</p>
+<h1>Plan your future with <span class="green">confidence.</span></h1>
+<p>Manage your account and review transaction requests in one place.</p>
+<button onclick="showAuth('register')">Create account</button>
+<button class="secondary" onclick="showAuth('login')">Log in</button>
+<p class="muted">Investments involve risk. Returns are not guaranteed.</p>
 </section>
 
-<section class="section" id="dashboard" style="display:none">
-<h2 data-i18n="dashboard">User Dashboard</h2>
-<div class="grid3">
-<div class="card"><small data-i18n="wallet">Available Wallet</small><h2 id="walletBal">$0.00</h2></div>
-<div class="card"><small data-i18n="invested">Total Invested</small><h2 id="investedBal">$0.00</h2></div>
-<div class="card"><small data-i18n="returns">Accrued Returns</small><h2 id="returnsBal">$0.00</h2></div>
-</div>
-<div class="card" style="margin-top:18px">
-<h3 data-i18n="topup">Top Up - Card Payment</h3>
-<p><small>Payment Gateway: PENDING CONFIGURATION - Sandbox mode only</small></p>
-<input placeholder="Amount e.g. 100" id="topupAmt"><button class="btn btn-primary" style="margin-top:10px" onclick="alert('TODO: Connect Stripe/Paystack - verify webhook server-side, never trust redirect')">Proceed to Secure Checkout</button>
-</div>
+<section id="auth" class="panel hidden">
+<button class="secondary" onclick="goHome()">← Back</button>
+<h2 id="authTitle">Create account</h2>
+<form id="authForm">
+<div id="nameBox"><label>Full name</label><input id="name" minlength="2"></div>
+<label>Email address</label><input id="email" type="email" required>
+<label>Password (minimum 10 characters)</label><input id="password" type="password" minlength="10" required>
+<button id="authButton">Create account</button>
+<p id="authError" class="error"></p>
+</form>
 </section>
 
-<section class="section" id="plans">
-<h2 data-i18n="plans_title">Investment Plans</h2>
-<p><small data-i18n="plans_note">Plans are database-backed. Returns vary. No guaranteed profits.</small></p>
-<div class="grid3" style="margin-top:16px">
-<div class="card"><h3>Starter</h3><p><small>Min $50 - Max $499 / 30 days</small></p><p data-i18n="risk_small">Risk: Capital at risk. Returns based on verified performance.</p><button class="btn btn-outline" style="width:100%;margin-top:10px">View Terms</button></div>
-<div class="card" style="border:1px solid var(--accent)"><h3>Growth</h3><p><small>Min $500 - Max $4999 / 90 days</small></p><p data-i18n="risk_med">Risk disclosure applies.</p><button class="btn btn-primary" style="width:100%;margin-top:10px">View Terms</button></div>
-<div class="card"><h3>Institutional</h3><p><small>Custom - Requires KYC & approval</small></p><button class="btn btn-outline" style="width:100%;margin-top:10px">Contact Compliance</button></div>
+<section id="dashboard" class="hidden">
+<h1>Welcome, <span class="green" id="userName"></span></h1>
+<div id="notice" class="notice"></div>
+<div class="grid">
+<div class="stat"><small>Account</small><h2>Active</h2></div>
+<div class="stat"><small>Pending requests</small><h2 id="pending">0</h2></div>
+<div class="stat"><small>Transaction records</small><h2 id="total">0</h2></div>
 </div>
+<div class="two">
+<section class="panel">
+<h2>Deposit or withdrawal request</h2>
+<p class="muted">This records a request only. It does not move money.</p>
+<form id="requestForm">
+<label>Request type</label>
+<select id="type"><option value="deposit">Deposit inquiry</option><option value="withdrawal">Withdrawal request</option></select>
+<label>Amount</label><input id="amount" type="number" min="1" step="0.01" required>
+<button>Submit request</button>
+</form><p id="requestMessage" class="muted"></p>
 </section>
-
-<section class="section" id="how"><h2 data-i18n="how_title">How It Works</h2><ol style="margin-left:20px"><li data-i18n="how1">Register with language and country</li><li data-i18n="how2">Verify email and phone via OTP</li><li data-i18n="how3">Top up via verified card payment</li><li data-i18n="how4">Choose plan, review risk and fees</li><li data-i18n="how5">Daily return job processes eligible investments at 06:00 UTC with idempotency key</li><li data-i18n="how6">Withdraw with ownership verification</li></ol></section>
-
-<section class="section" id="risk" class="card"><h2>Risk Disclosure</h2><p>Investing involves risk. Past performance does not guarantee future results. You may lose some or all invested capital. CTDK Investment does not promise fixed daily profits without substantiated basis. All returns must be backed by real financial records.</p></section>
-
-<section class="section" id="faq"><h2>FAQ</h2><div class="card"><strong>Is my card PIN needed?</strong><br><small>Never. We use tokenization. We never store PIN or CVV.</small></div></section>
-
-<footer class="section" style="border-top:1px solid var(--border)"><small>© CTDK Investment - Admin dashboard requires separate secure auth, role-based access, audit logs. Environment variables for secrets. Production requires HTTPS, backups, rate limiting.</small></footer>
-
+<section class="panel">
+<h2>Investment information</h2>
+<h3>Conservative</h3><p class="muted">Review the risks and fees before investing.</p>
+<h3>Balanced</h3><p class="muted">Investment values can rise or fall.</p>
+<h3>Growth</h3><p class="muted">Higher risks may mean greater losses.</p>
+</section>
+</div>
+<section class="panel">
+<h2>My transaction history</h2>
+<div class="tablewrap"><table><thead><tr><th>Type</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead><tbody id="myRows"></tbody></table></div>
+</section>
+<section id="adminPanel" class="panel hidden">
+<h2>Administrator dashboard</h2>
+<h3>Users</h3>
+<div class="tablewrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Action</th></tr></thead><tbody id="userRows"></tbody></table></div>
+<h3>Transaction requests</h3>
+<div class="tablewrap"><table><thead><tr><th>User</th><th>Type</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+</section>
+</section>
+</main>
+<footer>CTDK Investment · Account and request management starter</footer>
 <script>
-const dict={
-en:{nav_plans:"Plans",nav_how:"How It Works",nav_faq:"FAQ",login:"Login",register:"Register",hero_badge:"SECURE • TRANSPARENT • COMPLIANT",hero_title:"Build Your Financial Future with CTDK Investment",hero_desc:"Professional investment management with transparent accounting, verified payments, and real risk disclosure. No fabricated returns.",get_started:"Get Started",risk_btn:"Risk Disclosure",k1:"Verified Payments",k1d:"Webhook verified",k2:"Atomic Ledger",k2d:"No duplicate credits",k3:"Audit Logs",k3d:"Admin actions tracked",full_name:"Full Name",phone:"Phone with country code",country:"Country of Residence",language_q:"Which language do you understand best?",confirm_pwd:"Confirm Password",terms_agree:"I accept Terms and Privacy Policy",create_account:"Create Account - Send OTP",dashboard:"User Dashboard",wallet:"Available Wallet",invested:"Total Invested",returns:"Accrued Returns",topup:"Top Up - Card Payment",plans_title:"Investment Plans",plans_note:"Plans are database-backed. Returns vary. No guaranteed profits.",risk_small:"Risk: Capital at risk. Returns based on verified performance.",risk_med:"Risk disclosure applies.",how_title:"How It Works",how1:"Register with language and country",how2:"Verify email and phone via OTP",how3:"Top up via verified card payment",how4:"Choose plan, review risk and fees",how5:"Daily return job processes eligible investments at 06:00 UTC with idempotency key",how6:"Withdraw with ownership verification"},
-fr:{nav_plans:"Plans",hero_title:"Construisez votre avenir financier",login:"Connexion",register:"S'inscrire"},
-yo:{hero_title:"Kọ ọjọ iwaju owo rẹ pẹlu CTDK",login:"Wọle",register:"Forukọsilẹ"},
-ha:{hero_title:"Gina makomar kuɗin ku da CTDK",login:"Shiga",register:"Yi rijista"},
-ig:{hero_title:"Wulite Ọdịnihu Ego Gị na CTDK",login:"Banye",register:"Debanye aha"},
-ar:{hero_title:"ابنِ مستقبلك المالي مع CTDK",login:"تسجيل الدخول",register:"تسجيل"}
+const $=id=>document.getElementById(id);
+let mode="register";
+
+function escapeHTML(s){
+ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function money(n){
+ return new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(Number(n)||0);
+}
+function section(id){
+ ["home","auth","dashboard"].forEach(s=>$(s).classList.toggle("hidden",s!==id));
+}
+function goHome(){section("home")}
+function showAuth(m){
+ mode=m;
+ $("authTitle").textContent=m==="register"?"Create account":"Log in";
+ $("authButton").textContent=m==="register"?"Create account":"Log in";
+ $("nameBox").classList.toggle("hidden",m!=="register");
+ $("name").required=m==="register";
+ $("authError").textContent="";
+ section("auth");
+}
+async function api(url,options={}){
+ const r=await fetch(url,{...options,headers:{"Content-Type":"application/json",...(options.headers||{})}});
+ const d=await r.json();
+ if(!r.ok)throw Error(d.error||"Request failed");
+ return d;
+}
+$("authForm").onsubmit=async e=>{
+ e.preventDefault();$("authError").textContent="";
+ try{
+  await api("/api/"+mode,{method:"POST",body:JSON.stringify({
+   name:$("name").value,email:$("email").value,password:$("password").value
+  })});
+  await loadDashboard();
+ }catch(err){$("authError").textContent=err.message}
 };
-function changeLang(l){localStorage.setItem('ctdk_lang',l);applyLang(l)}
-function applyLang(l){const d=dict[l]||dict.en;document.querySelectorAll('[data-i18n]').forEach(el=>{const k=el.getAttribute('data-i18n');if(d[k])el.textContent=d[k]});if(l==='ar')document.documentElement.dir='rtl';else document.documentElement.dir='ltr'}
-function showAuth(t){document.getElementById('authBox').scrollIntoView({behavior:'smooth'});document.getElementById('authTitle').textContent=t==='login'?'Login':'Create Account'}
-function registerMock(){const em=document.getElementById('email').value;if(!em){alert('Enter email');return}alert('MOCK: OTP would be sent via configured provider. Backend TODO.');document.getElementById('dashboard').style.display='block';document.getElementById('dashboard').scrollIntoView()}
-applyLang(localStorage.getItem('ctdk_lang')||'en');
+$("requestForm").onsubmit=async e=>{
+ e.preventDefault();$("requestMessage").textContent="Sending…";
+ try{
+  const d=await api("/api/requests",{method:"POST",body:JSON.stringify({
+   type:$("type").value,amount:$("amount").value
+  })});
+  $("requestMessage").textContent=d.message;
+  $("amount").value="";
+  await loadDashboard();
+ }catch(err){$("requestMessage").textContent=err.message}
+};
+async function logout(){
+ await fetch("/api/logout",{method:"POST"});
+ $("logout").classList.add("hidden");
+ $("adminPanel").classList.add("hidden");
+ goHome();
+}
+async function loadDashboard(){
+ try{
+  const d=await api("/api/me");
+  $("logout").classList.remove("hidden");
+  $("userName").textContent=d.user.name;
+  $("notice").textContent=d.notice;
+  $("pending").textContent=d.transactions.filter(t=>t.status==="pending").length;
+  $("total").textContent=d.transactions.length;
+  $("myRows").innerHTML=d.transactions.map(t=>`<tr><td>${escapeHTML(t.type)}</td><td>${money(t.amount)}</td><td>${escapeHTML(t.status)}</td><td>${escapeHTML(t.created_at)}</td></tr>`).join("")||"<tr><td colspan='4'>No requests yet.</td></tr>";
+  section("dashboard");
+  $("adminPanel").classList.toggle("hidden",d.user.role!=="admin");
+  if(d.user.role==="admin")await loadAdmin();
+ }catch(e){$("logout").classList.add("hidden");goHome()}
+}
+async function loadAdmin(){
+ const d=await api("/api/admin");
+ $("userRows").innerHTML=d.users.map(u=>`<tr><td>${escapeHTML(u.name)}</td><td>${escapeHTML(u.email)}</td><td>${escapeHTML(u.role)}</td><td>${escapeHTML(u.status)}</td><td>${u.role==="admin"?"Admin":`<button onclick="changeUser(${u.id},'${u.status==="active"?"suspended":"active"}')">${u.status==="active"?"Suspend":"Activate"}</button>`}</td></tr>`).join("");
+ $("requestRows").innerHTML=d.requests.map(t=>`<tr><td>${escapeHTML(t.name)}</td><td>${escapeHTML(t.type)}</td><td>${money(t.amount)}</td><td>${escapeHTML(t.status)}</td><td><button onclick="changeRequest(${t.id},'approved')">Approve record</button><button onclick="changeRequest(${t.id},'rejected')">Reject</button></td></tr>`).join("")||"<tr><td colspan='5'>No requests.</td></tr>";
+}
+async function changeUser(id,status){
+ try{await api("/api/admin/users/"+id,{method:"PATCH",body:JSON.stringify({status})});await loadAdmin()}catch(e){alert(e.message)}
+}
+async function changeRequest(id,status){
+ try{await api("/api/admin/requests/"+id,{method:"PATCH",body:JSON.stringify({status})});await loadDashboard()}catch(e){alert(e.message)}
+}
+loadDashboard();
 </script>
-</body>
-</html>
+</body></html>`;
+
+app.get("/", (req,res) => res.type("html").send(page));
+
+app.post("/api/register", async (req,res) => {
+ try {
+  const name=String(req.body.name||"").trim();
+  const email=String(req.body.email||"").trim().toLowerCase();
+  const password=String(req.body.password||"");
+  if(name.length<2 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || password.length<10)
+   return res.status(400).json({error:"Enter your name, a valid email, and a password of at least 10 characters."});
+  const hash=await bcrypt.hash(password,12);
+  const result=db.prepare("INSERT INTO users(name,email,password) VALUES(?,?,?)").run(name,email,hash);
+  req.session.userId=result.lastInsertRowid;
+  res.json({ok:true});
+ } catch(e) {
+  res.status(409).json({error:"That email may already be registered."});
+ }
+});
+
+app.post("/api/login", async (req,res) => {
+ const email=String(req.body.email||"").trim().toLowerCase();
+ const password=String(req.body.password||"");
+ const user=db.prepare("SELECT * FROM users WHERE email=?").get(email);
+ if(!user || !(await bcrypt.compare(password,user.password)) || user.status!=="active")
+  return res.status(401).json({error:"Email/password is incorrect or the account is disabled."});
+ req.session.userId=user.id;
+ res.json({ok:true});
+});
+
+app.post("/api/logout",(req,res)=>{
+ req.session.destroy(()=>res.json({ok:true}));
+});
+
+app.get("/api/me",auth,(req,res)=>{
+ const transactions=db.prepare(
+  "SELECT id,type,amount,status,created_at FROM requests WHERE user_id=? ORDER BY id DESC"
+ ).all(req.user.id);
+ res.json({
+  user:req.user,
+  transactions,
+  notice:"Requests are recorded for review only. No money is held, transferred, or invested by this starter."
+ });
+});
+
+app.post("/api/requests",auth,(req,res)=>{
+ const type=String(req.body.type||"");
+ const amount=Number(req.body.amount);
+ if(!["deposit","withdrawal"].includes(type) || !Number.isFinite(amount) || amount<=0)
+  return res.status(400).json({error:"Enter a valid request type and amount."});
+ db.prepare("INSERT INTO requests(user_id,type,amount) VALUES(?,?,?)").run(req.user.id,type,amount);
+ res.json({ok:true,message:"Request recorded. No payment was taken and no funds were transferred."});
+});
+
+app.get("/api/admin",auth,admin,(req,res)=>{
+ const users=db.prepare("SELECT id,name,email,role,status,created_at FROM users ORDER BY id DESC").all();
+ const requests=db.prepare(
+  "SELECT r.id,r.type,r.amount,r.status,r.created_at,u.name,u.email FROM requests r JOIN users u ON u.id=r.user_id ORDER BY r.id DESC"
+ ).all();
+ res.json({users,requests});
+});
+
+app.patch("/api/admin/users/:id",auth,admin,(req,res)=>{
+ const status=String(req.body.status||"");
+ if(!["active","suspended"].includes(status))
+  return res.status(400).json({error:"Invalid status."});
+ const id=Number(req.params.id);
+ if(id===req.user.id && status!=="active")
+  return res.status(400).json({error:"You cannot suspend your own admin account."});
+ db.prepare("UPDATE users SET status=? WHERE id=?").run(status,id);
+ res.json({ok:true});
+});
+
+app.patch("/api/admin/requests/:id",auth,admin,(req,res)=>{
+ const status=String(req.body.status||"");
+ if(!["pending","approved","rejected"].includes(status))
+  return res.status(400).json({error:"Invalid status."});
+ db.prepare("UPDATE requests SET status=? WHERE id=?").run(status,Number(req.params.id));
+ res.json({ok:true,message:"Record updated. This does not move money."});
+});
+
+createAdmin().then(()=>{
+ app.listen(PORT,()=>console.log("CTDK Investment running on port "+PORT));
+});
+npm init -y
+npm install express express-session bcryptjs better-sqlite3
+SESSION_SECRET=a-long-random-secret-value
+ADMIN_EMAIL=your-admin-email@example.com
+ADMIN_PASSWORD=your-strong-admin-password
+node server.js
